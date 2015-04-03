@@ -6,12 +6,13 @@
 # WARNING: The extra patches applied are all considered EXPERIMENTAL, and bad
 # things may happen to security or anonymity if used.
 #
-# This PKGBUILD builds Tor with several extra experimental patches not yet merged
-# into master.  This is primarily done to suit the needs of "someone who runs
-# Tor to find bugs in it", but such a build may be useful to other people as
-# well.
+# This PKGBUILD builds Tor with several extra experimental patches not yet
+# merged into master.  This is primarily done to suit the needs of "someone
+# who runs Tor to find bugs in it", but such a build may be useful to other
+# people as well.
 #
-#  * bug6411 - ADD_ONION/DEL_ONION Hidden Service creation via the Control Port.
+#  * bug6411  - ADD_ONION/DEL_ONION Hidden Service creation via the Control
+#               Port.
 #  * bug15482 - Circuit lifespan increased indefinately for circuits created
 #               from a SocksPort with IsolateSocksAuth.
 #
