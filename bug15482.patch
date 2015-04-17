@@ -1,23 +1,22 @@
-From 748414784f71126b093aa7466908e00f71a7b046 Mon Sep 17 00:00:00 2001
-From: Mike Perry <mikeperry-git@torproject.org>
-Date: Fri, 27 Mar 2015 12:57:37 -0700
-Subject: [PATCH] Bug 15482: Don't abandon circuits that are still in use for
- browsing.
+From 6443d781f7db88acc5f653211c9001596c84d6a1 Mon Sep 17 00:00:00 2001
+From: Nick Mathewson <nickm@torproject.org>
+Date: Fri, 27 Mar 2015 10:19:38 -0400
+Subject: [PATCH] More cautious approach to increasing circuit lifetime for TB
 
-Only applies to connections with SOCKS auth set, so that non-web Tor
-activity is not affected.
-
-Simpler version of Nick's patch because the randomness worried me, and I'm not
-otherwise sure why we want a max here.
+Only increase the lifetime when authentication-based circuit isolation
+is in use, and never increase it beyond MaxIsolatedCircuitDirtiness *
+1.125
 ---
- src/or/circuituse.c | 11 +++++++++--
- 1 file changed, 9 insertions(+), 2 deletions(-)
+ src/or/circuituse.c | 17 +++++++++++++++--
+ src/or/config.c     | 12 ++++++++++++
+ src/or/or.h         |  5 ++++-
+ 3 files changed, 31 insertions(+), 3 deletions(-)
 
 diff --git a/src/or/circuituse.c b/src/or/circuituse.c
-index d0d31ad..6cce4bf 100644
+index d0d31ad..a16ce34 100644
 --- a/src/or/circuituse.c
 +++ b/src/or/circuituse.c
-@@ -2264,8 +2264,15 @@ connection_ap_handshake_attach_chosen_circuit(entry_connection_t *conn,
+@@ -2264,8 +2264,20 @@ connection_ap_handshake_attach_chosen_circuit(entry_connection_t *conn,
  
    base_conn->state = AP_CONN_STATE_CIRCUIT_WAIT;
  
@@ -25,16 +24,82 @@ index d0d31ad..6cce4bf 100644
 -    circ->base_.timestamp_dirty = time(NULL);
 +  if (!circ->base_.timestamp_dirty) {
 +    circ->base_.timestamp_dirty = approx_time();
++    time_t more = get_options()->MaxIsolatedCircuitDirtiness;
++    more += crypto_rand_int((int)more / 8);
++    circ->base_.max_timestamp_dirty = circ->base_.timestamp_dirty + more;
 +  } else if ((conn->entry_cfg.isolation_flags & ISO_SOCKSAUTH) &&
 +             (conn->socks_request->usernamelen ||
 +              conn->socks_request->passwordlen)) {
-+    /* When stream isolation is in use and controlled by an application
-+     * we are willing to keep using the stream. */
-+    circ->base_.timestamp_dirty = approx_time();
++    /* When stream isolation is in use and controlled by an application, up to
++     * max_timestamp_dirty, we are willing to keep using the stream. */
++    if (approx_time() < circ->base_.max_timestamp_dirty) {
++      circ->base_.timestamp_dirty = approx_time();
++    }
 +  }
  
    pathbias_count_use_attempt(circ);
  
+@@ -2530,6 +2542,7 @@ mark_circuit_unusable_for_new_conns(origin_circuit_t *circ)
+     circ->base_.timestamp_dirty = 1; /* prevent underflow */
+   else
+     circ->base_.timestamp_dirty -= options->MaxCircuitDirtiness;
++  circ->base_.max_timestamp_dirty = circ->base_.timestamp_dirty;
+ 
+   circ->unusable_for_new_conns = 1;
+ }
+diff --git a/src/or/config.c b/src/or/config.c
+index fca350c..23dcef2 100644
+--- a/src/or/config.c
++++ b/src/or/config.c
+@@ -312,6 +312,7 @@ static config_var_t option_vars_[] = {
+   VAR("MapAddress",              LINELIST, AddressMap,           NULL),
+   V(MaxAdvertisedBandwidth,      MEMUNIT,  "1 GB"),
+   V(MaxCircuitDirtiness,         INTERVAL, "10 minutes"),
++  V(MaxIsolatedCircuitDirtiness, INTERVAL, "4 hours"),
+   V(MaxClientCircuitsPending,    UINT,     "32"),
+   VAR("MaxMemInQueues",          MEMUNIT,   MaxMemInQueues_raw, "0"),
+   OBSOLETE("MaxOnionsPending"),
+@@ -3143,6 +3144,17 @@ options_validate(or_options_t *old_options, or_options_t *options,
+     options->MaxCircuitDirtiness = MAX_MAX_CIRCUIT_DIRTINESS;
+   }
+ 
++  if (options->MaxIsolatedCircuitDirtiness < options->MaxCircuitDirtiness) {
++    log_warn(LD_CONFIG, "MaxIsolatedCircuitDirtiness is less than "
++             "MaxCircuitDirtiness; raising it.");
++    options->MaxIsolatedCircuitDirtiness = options->MaxCircuitDirtiness;
++  }
++  if (options->MaxIsolatedCircuitDirtiness > MAX_MAX_CIRCUIT_DIRTINESS) {
++    log_warn(LD_CONFIG, "MaxIsolatedCircuitDirtiness option is too high; "
++             "setting to %d days.", MAX_MAX_CIRCUIT_DIRTINESS/86400);
++    options->MaxIsolatedCircuitDirtiness = MAX_MAX_CIRCUIT_DIRTINESS;
++  }
++
+   if (options->CircuitStreamTimeout &&
+       options->CircuitStreamTimeout < MIN_CIRCUIT_STREAM_TIMEOUT) {
+     log_warn(LD_CONFIG, "CircuitStreamTimeout option is too short; "
+diff --git a/src/or/or.h b/src/or/or.h
+index f75e776..c3225fa 100644
+--- a/src/or/or.h
++++ b/src/or/or.h
+@@ -2846,6 +2846,7 @@ typedef struct circuit_t {
+    * document it more thoroughly to make sure of that.
+    */
+   time_t timestamp_dirty;
++  time_t max_timestamp_dirty;
+ 
+   uint16_t marked_for_close; /**< Should we close this circuit at the end of
+                               * the main loop? (If true, holds the line number
+@@ -3650,7 +3651,9 @@ typedef struct {
+   int NewCircuitPeriod; /**< How long do we use a circuit before building
+                          * a new one? */
+   int MaxCircuitDirtiness; /**< Never use circs that were first used more than
+-                                this interval ago. */
++                                this interval ago. DOCDOC; no longer right */
++  int MaxIsolatedCircuitDirtiness; /**< Never use circs that were first used
++                                    * more than this interval ago. DOCDOC */
+   int PredictedPortsRelevanceTime; /** How long after we've requested a
+                                     * connection for a given port, do we want
+                                     * to continue to pick exits that support
 -- 
-1.9.1
+2.3.4
 
