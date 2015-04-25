@@ -1,6 +1,6 @@
-From d2023c897919265428406cef448f276e7e97ba3f Mon Sep 17 00:00:00 2001
+From 3d4f7cd0c0e44f1dcef8a27175a4d6521335977f Mon Sep 17 00:00:00 2001
 From: Yawning Angel <yawning@schwanenlied.me>
-Date: Wed, 25 Mar 2015 14:11:08 +0000
+Date: Sat, 25 Apr 2015 08:23:15 +0000
 Subject: [PATCH 1/1] Add "ADD_ONION"/"DEL_ONION" and "GETINFO onions/*" to the
  controller.
 
@@ -11,16 +11,22 @@ the tor instance.
 
 Implements #6411.
 ---
- changes/feature6411  |   7 +
- src/common/crypto.c  |  74 ++++++++++
- src/common/crypto.h  |   3 +
- src/or/connection.c  |   7 +
- src/or/control.c     | 372 +++++++++++++++++++++++++++++++++++++++++++++++++++
- src/or/or.h          |   3 +
- src/or/rendservice.c | 241 +++++++++++++++++++++++++++++----
- src/or/rendservice.h |   5 +
- 8 files changed, 689 insertions(+), 23 deletions(-)
+ changes/feature6411        |   7 +
+ src/common/crypto.c        |  72 ++++++++
+ src/common/crypto.h        |   3 +
+ src/or/connection.c        |   7 +
+ src/or/control.c           | 405 +++++++++++++++++++++++++++++++++++++++++++++
+ src/or/control.h           |   5 +
+ src/or/or.h                |   3 +
+ src/or/rendservice.c       | 301 ++++++++++++++++++++++++++++-----
+ src/or/rendservice.h       |  19 +++
+ src/test/include.am        |   1 +
+ src/test/test.c            |   4 +-
+ src/test/test_controller.c | 161 ++++++++++++++++++
+ src/test/test_crypto.c     |  37 +++++
+ 13 files changed, 980 insertions(+), 45 deletions(-)
  create mode 100644 changes/feature6411
+ create mode 100644 src/test/test_controller.c
 
 diff --git a/changes/feature6411 b/changes/feature6411
 new file mode 100644
@@ -36,10 +42,10 @@ index 0000000..6024364
 +      information about hidden services created via the controller.
 +      Part of ticket 6411.
 diff --git a/src/common/crypto.c b/src/common/crypto.c
-index 91c4025..ada05b3 100644
+index 7857a54..044d5d3 100644
 --- a/src/common/crypto.c
 +++ b/src/common/crypto.c
-@@ -1397,6 +1397,80 @@ crypto_pk_get_hashed_fingerprint(crypto_pk_t *pk, char *fp_out)
+@@ -1397,6 +1397,78 @@ crypto_pk_get_hashed_fingerprint(crypto_pk_t *pk, char *fp_out)
    return 0;
  }
  
@@ -63,11 +69,9 @@ index 91c4025..ada05b3 100644
 +  if (der_len < 0 || der == NULL)
 +    return ret;
 +
-+  char *priv = tor_calloc(der_len, 2);
-+  if (base64_encode(priv, der_len * 2, (char *)der, der_len) >= 0) {
-+    tor_strstrip(priv, "\r\n");
-+    size_t priv_len = strlen(priv);
-+    memwipe(priv + priv_len, 0, 2 * der_len - priv_len);
++  size_t priv_len = base64_encode_size(der_len, 0) + 1;
++  char *priv = tor_malloc_zero(priv_len);
++  if (base64_encode(priv, der_len * 2, (char *)der, der_len, 0) >= 0) {
 +    *priv_out = priv;
 +    ret = 0;
 +  } else {
@@ -89,9 +93,9 @@ index 91c4025..ada05b3 100644
 +  crypto_pk_t *pk = NULL;
 +
 +  char *der = tor_malloc_zero(len + 1);
-+  size_t der_len = base64_decode(der, len, str, len);
++  int der_len = base64_decode(der, len, str, len);
 +  if (der_len <= 0) {
-+    log_warn(LD_CRYPTO, "Stored DER RSA private key seems corrupted (base64).");
++    log_warn(LD_CRYPTO, "Stored RSA private key seems corrupted (base64).");
 +    goto out;
 +  }
 +
@@ -111,8 +115,8 @@ index 91c4025..ada05b3 100644
 +    goto out;
 +  }
 +
-+out:
-+  memwipe(der, 0, der_len);
++ out:
++  memwipe(der, 0, len + 1);
 +  tor_free(der);
 +  return pk;
 +}
@@ -121,10 +125,10 @@ index 91c4025..ada05b3 100644
  
  /** Return a pointer to the key set for the cipher in <b>env</b>.
 diff --git a/src/common/crypto.h b/src/common/crypto.h
-index d305bc1..49e8b30 100644
+index 1ac02ea..8b620d9 100644
 --- a/src/common/crypto.h
 +++ b/src/common/crypto.h
-@@ -185,6 +185,9 @@ int crypto_pk_get_all_digests(crypto_pk_t *pk, digests_t *digests_out);
+@@ -184,6 +184,9 @@ int crypto_pk_get_all_digests(crypto_pk_t *pk, digests_t *digests_out);
  int crypto_pk_get_fingerprint(crypto_pk_t *pk, char *fp_out,int add_space);
  int crypto_pk_get_hashed_fingerprint(crypto_pk_t *pk, char *fp_out);
  
@@ -135,7 +139,7 @@ index d305bc1..49e8b30 100644
  const char *crypto_cipher_get_key(crypto_cipher_t *env);
  
 diff --git a/src/or/connection.c b/src/or/connection.c
-index 369df67..6d2be7a 100644
+index 5610815..24d47cc 100644
 --- a/src/or/connection.c
 +++ b/src/or/connection.c
 @@ -586,6 +586,13 @@ connection_free_(connection_t *conn)
@@ -153,7 +157,7 @@ index 369df67..6d2be7a 100644
  
    /* Probably already freed by connection_free. */
 diff --git a/src/or/control.c b/src/or/control.c
-index 34d539b..882b0cf 100644
+index 8c95b05..7c8a6c4 100644
 --- a/src/or/control.c
 +++ b/src/or/control.c
 @@ -36,6 +36,8 @@
@@ -163,9 +167,9 @@ index 34d539b..882b0cf 100644
 +#include "rendcommon.h"
 +#include "rendservice.h"
  #include "reasons.h"
- #include "rephist.h"
- #include "router.h"
-@@ -92,6 +94,11 @@ static uint8_t *authentication_cookie = NULL;
+ #include "rendclient.h"
+ #include "rendcommon.h"
+@@ -96,6 +98,11 @@ static uint8_t *authentication_cookie = NULL;
    "Tor safe cookie authentication controller-to-server hash"
  #define SAFECOOKIE_SERVER_NONCE_LEN DIGEST256_LEN
  
@@ -177,10 +181,10 @@ index 34d539b..882b0cf 100644
  /** A sufficiently large size to record the last bootstrap phase string. */
  #define BOOTSTRAP_MSG_LEN 1024
  
-@@ -157,6 +164,10 @@ static int handle_control_resolve(control_connection_t *conn, uint32_t len,
- static int handle_control_usefeature(control_connection_t *conn,
-                                      uint32_t len,
+@@ -163,6 +170,10 @@ static int handle_control_usefeature(control_connection_t *conn,
                                       const char *body);
+ static int handle_control_hsfetch(control_connection_t *conn, uint32_t len,
+                                   const char *body);
 +static int handle_control_add_onion(control_connection_t *conn, uint32_t len,
 +                                    const char *body);
 +static int handle_control_del_onion(control_connection_t *conn, uint32_t len,
@@ -188,7 +192,7 @@ index 34d539b..882b0cf 100644
  static int write_stream_target_to_buf(entry_connection_t *conn, char *buf,
                                        size_t len);
  static void orconn_target_get_name(char *buf, size_t len,
-@@ -2107,6 +2118,31 @@ getinfo_helper_events(control_connection_t *control_conn,
+@@ -2170,6 +2181,31 @@ getinfo_helper_events(control_connection_t *control_conn,
    return 0;
  }
  
@@ -220,7 +224,7 @@ index 34d539b..882b0cf 100644
  /** Callback function for GETINFO: on a given control connection, try to
   * answer the question <b>q</b> and store the newly-allocated answer in
   * *<b>a</b>. If an internal error occurs, return -1 and optionally set
-@@ -2239,6 +2275,10 @@ static const getinfo_item_t getinfo_items[] = {
+@@ -2306,6 +2342,10 @@ static const getinfo_item_t getinfo_items[] = {
    ITEM("exit-policy/ipv4", policies, "IPv4 parts of exit policy"),
    ITEM("exit-policy/ipv6", policies, "IPv6 parts of exit policy"),
    PREFIX("ip-to-country/", geoip, "Perform a GEOIP lookup"),
@@ -231,7 +235,7 @@ index 34d539b..882b0cf 100644
    { NULL, NULL, NULL, 0 }
  };
  
-@@ -3211,6 +3251,315 @@ handle_control_dropguards(control_connection_t *conn,
+@@ -3388,6 +3428,348 @@ exit:
    return 0;
  }
  
@@ -244,7 +248,6 @@ index 34d539b..882b0cf 100644
 +{
 +  smartlist_t *args;
 +  size_t arg_len;
-+  int bad = 0;
 +  (void) len; /* body is nul-terminated; it's safe to ignore the length */
 +  args = getargs_helper("ADD_ONION", conn, body, 2, -1);
 +  if (!args)
@@ -255,7 +258,7 @@ index 34d539b..882b0cf 100644
 +   * material first, since there's no reason to touch that at all if any of
 +   * the other arguments are malformed.
 +   */
-+  smartlist_t *port_cfg = smartlist_new();
++  smartlist_t *port_cfgs = smartlist_new();
 +  int discard_pk = 0;
 +  int detach = 0;
 +  for (size_t i = 1; i < arg_len; i++) {
@@ -265,27 +268,15 @@ index 34d539b..882b0cf 100644
 +    const char *arg = smartlist_get(args, i);
 +    if (!strcasecmpstart(arg, port_prefix)) {
 +      /* "Port=VIRTPORT[,TARGET]". */
-+      char *port_str = tor_strdup(arg + strlen(port_prefix));
-+      char *comma_pos;
++      const char *port_str = arg + strlen(port_prefix);
 +
-+      /* Convert the Port argument value into a form capable of being parsed
-+       * by rendservice.c:parse_port_config(), and do some minor sanity
-+       * checking.
-+       */
-+      smartlist_add(port_cfg, port_str); /* Always add, easy cleanup. */
-+      int virtport = (int)tor_parse_long(port_str, 10, 1, 65535, NULL,
-+                                         &comma_pos);
-+      if (!virtport) {
-+        /* That's odd, the argument body doesn't begin with a port. */
-+        connection_printf_to_buf(conn, "512 Invalid VIRTPORT\r\n");
-+        goto out;
-+      } else if (*comma_pos == ',') {
-+        /* The first comma if any is separating the VIRTPORT and TARGET. */
-+        *comma_pos = ' ';
-+      } else if (*comma_pos != '\0') { /* Missing ",TARGET" is ok. */
++      rend_service_port_config_t *cfg =
++          rend_service_parse_port_config(port_str, ",", NULL);
++      if (!cfg) {
 +        connection_printf_to_buf(conn, "512 Invalid VIRTPORT/TARGET\r\n");
 +        goto out;
 +      }
++      smartlist_add(port_cfgs, cfg);
 +    } else if (!strcasecmpstart(arg, flags_prefix)) {
 +      /* "Flags=Flag[,Flag]", where Flag can be:
 +       *   * 'DiscardPK' - If tor generates the keypair, do not include it in
@@ -297,6 +288,8 @@ index 34d539b..882b0cf 100644
 +      static const char *detach_flag = "Detach";
 +
 +      smartlist_t *flags = smartlist_new();
++      int bad = 0;
++
 +      smartlist_split_string(flags, arg + strlen(flags_prefix), ",",
 +                             SPLIT_IGNORE_BLANK, 0);
 +      if (smartlist_len(flags) < 1) {
@@ -310,7 +303,8 @@ index 34d539b..882b0cf 100644
 +        } else if (!strcasecmp(flag, detach_flag)) {
 +          detach = 1;
 +        } else {
-+          connection_printf_to_buf(conn, "512 Invalid 'Flags' argument: %s\r\n",
++          connection_printf_to_buf(conn,
++                                   "512 Invalid 'Flags' argument: %s\r\n",
 +                                   escaped(flag));
 +          bad = 1;
 +          break;
@@ -325,93 +319,38 @@ index 34d539b..882b0cf 100644
 +      goto out;
 +    }
 +  }
-+  if (smartlist_len(port_cfg) == 0) {
++  if (smartlist_len(port_cfgs) == 0) {
 +    connection_printf_to_buf(conn, "512 Missing 'Port' argument\r\n");
 +    goto out;
 +  }
 +
-+  /* Parse the "keytype:keyblob" argument.
-+   * Note: Errors are intentionally vague to prevent from echoing potentially
-+   * sensitive key material on the event of user error.
-+   */
-+  smartlist_t *key_args = smartlist_new();
++  /* Parse the "keytype:keyblob" argument. */
 +  crypto_pk_t *pk = NULL;
 +  const char *key_new_alg = NULL;
 +  char *key_new_blob = NULL;
++  char *err_msg = NULL;
 +
-+  bad = 1; /* Assume failure, cleared on success. */
-+  smartlist_split_string(key_args, smartlist_get(args, 0), ":",
-+                         SPLIT_IGNORE_BLANK, 0);
-+  if (smartlist_len(key_args) != 2) {
-+    connection_printf_to_buf(conn, "512 Invalid key type/blob\r\n");
-+  } else {
-+    static const char *key_type_new = "NEW";
-+    static const char *key_type_best = "BEST";
-+    static const char *key_type_rsa1024 = "RSA1024";
-+
-+    const char *key_type = smartlist_get(key_args, 0);
-+    const char *key_blob = smartlist_get(key_args, 1);
-+    if (!strcasecmp(key_type_rsa1024, key_type)) {
-+      /* Loading a pre-existing RSA1024 key. */
-+      pk = crypto_pk_base64_decode(key_blob, strlen(key_blob));
-+      if (!pk) {
-+        connection_printf_to_buf(conn, "512 Failed to decode RSA key\r\n");
-+        goto done_keyargs;
-+      }
-+      if (crypto_pk_num_bits(pk) != PK_BYTES*8) {
-+        connection_printf_to_buf(conn, "512 Invalid RSA key size\r\n");
-+        goto done_keyargs;
-+      }
-+    } else if (!strcasecmp(key_type_new, key_type)) {
-+      /* Generating a new key, algorithm specified in the keyBlob. */
-+      if (!strcasecmp(key_type_rsa1024, key_blob) ||
-+          !strcasecmp(key_type_best, key_blob)) {
-+        /* "RSA1024", RSA 1024 bit, also currently "BEST" by default. */
-+        pk = crypto_pk_new();
-+        if (crypto_pk_generate_key(pk)) {
-+          connection_printf_to_buf(conn, "551 Failed to generate %s key\r\n",
-+                                   key_type_rsa1024);
-+          goto done_keyargs;
-+        }
-+        if (!discard_pk) {
-+          if (crypto_pk_base64_encode(pk, &key_new_blob)) {
-+            connection_printf_to_buf(conn, "551 Failed to encode %s key\r\n",
-+                                     key_type_rsa1024);
-+            goto done_keyargs;
-+          }
-+          key_new_alg = key_type_rsa1024;
-+        }
-+      } else {
-+        connection_printf_to_buf(conn, "513 Invalid key type\r\n");
-+        goto done_keyargs;
-+      }
-+    } else {
-+      connection_printf_to_buf(conn, "513 Invalid key type\r\n");
-+      goto done_keyargs;
++  pk = add_onion_helper_keyarg(smartlist_get(args, 0), discard_pk,
++                               &key_new_alg, &key_new_blob,
++                               &err_msg);
++  if (!pk) {
++    if (err_msg) {
++      connection_write_str_to_buf(err_msg, conn);
++      tor_free(err_msg);
 +    }
-+    /* Succeded in either loading or generating a new key. */
-+    tor_assert(pk);
-+    bad = 0;
-+  }
-+done_keyargs:
-+  SMARTLIST_FOREACH(key_args, char *, cp, {
-+    memwipe(cp, 0, strlen(cp));
-+    tor_free(cp);
-+  });
-+  smartlist_free(key_args);
-+  if (bad) {
-+    if (pk)
-+      crypto_pk_free(pk);
 +    goto out;
 +  }
++  tor_assert(!err_msg);
 +
 +  /* Create the HS, using private key pk, and port config port_cfg.
-+   * rend_service_add_ephemeral() will destroy pk on failure.
++   * rend_service_add_ephemeral() will take ownership of pk and port_cfg,
++   * regardless of success/failure.
 +   */
 +  char *service_id = NULL;
-+  int ret = rend_service_add_ephemeral(pk, port_cfg, &service_id);
++  int ret = rend_service_add_ephemeral(pk, port_cfgs, &service_id);
++  port_cfgs = NULL; /* port_cfgs is now owned by the rendservice code. */
 +  switch (ret) {
-+  case 0:
++  case RSAE_OKAY:
 +  {
 +    char *buf = NULL;
 +    tor_assert(service_id);
@@ -445,16 +384,16 @@ index 34d539b..882b0cf 100644
 +    tor_free(buf);
 +    break;
 +  }
-+  case -2:
++  case RSAE_BADPRIVKEY:
 +    connection_printf_to_buf(conn, "551 Failed to generate onion address\r\n");
 +    break;
-+  case -3:
++  case RSAE_ADDREXISTS:
 +    connection_printf_to_buf(conn, "550 Onion address collision\r\n");
 +    break;
-+  case -4:
++  case RSAE_BADVIRTPORT:
 +    connection_printf_to_buf(conn, "512 Invalid VIRTPORT/TARGET\r\n");
 +    break;
-+  case -1: /* FALLSTHROUGH */
++  case RSAE_INTERNAL: /* FALLSTHROUGH */
 +  default:
 +    connection_printf_to_buf(conn, "551 Failed to add Onion Service\r\n");
 +  }
@@ -463,9 +402,12 @@ index 34d539b..882b0cf 100644
 +    tor_free(key_new_blob);
 +  }
 +
-+out:
-+  SMARTLIST_FOREACH(port_cfg, char *, cp, tor_free(cp));
-+  smartlist_free(port_cfg);
++ out:
++  if (port_cfgs) {
++    SMARTLIST_FOREACH(port_cfgs, rend_service_port_config_t*, p,
++                      rend_service_port_config_free(p));
++    smartlist_free(port_cfgs);
++  }
 +
 +  SMARTLIST_FOREACH(args, char *, cp, {
 +    memwipe(cp, 0, strlen(cp));
@@ -473,6 +415,101 @@ index 34d539b..882b0cf 100644
 +  });
 +  smartlist_free(args);
 +  return 0;
++}
++
++/** Helper function to handle parsing the KeyType:KeyBlob argument to the
++ * ADD_ONION command. Return a new crypto_pk_t and if a new key was generated
++ * and the private key not discarded, the algorithm and serialized private key,
++ * or NULL and an optional control protocol error message on failure.  The
++ * caller is responsible for freeing the returned key_new_blob and err_msg.
++ *
++ * Note: The error messages returned are deliberately vague to avoid echoing
++ * key material.
++ */
++STATIC crypto_pk_t *
++add_onion_helper_keyarg(const char *arg, int discard_pk,
++                        const char **key_new_alg_out, char **key_new_blob_out,
++                        char **err_msg_out)
++{
++  smartlist_t *key_args = smartlist_new();
++  crypto_pk_t *pk = NULL;
++  const char *key_new_alg = NULL;
++  char *key_new_blob = NULL;
++  char *err_msg = NULL;
++  int ok = 0;
++
++  smartlist_split_string(key_args, arg, ":", SPLIT_IGNORE_BLANK, 0);
++  if (smartlist_len(key_args) != 2) {
++    err_msg = tor_strdup("512 Invalid key type/blob\r\n");
++    goto err;
++  }
++
++  /* The format is "KeyType:KeyBlob". */
++  static const char *key_type_new = "NEW";
++  static const char *key_type_best = "BEST";
++  static const char *key_type_rsa1024 = "RSA1024";
++
++  const char *key_type = smartlist_get(key_args, 0);
++  const char *key_blob = smartlist_get(key_args, 1);
++
++  if (!strcasecmp(key_type_rsa1024, key_type)) {
++    /* "RSA:<Base64 Blob>" - Loading a pre-existing RSA1024 key. */
++    pk = crypto_pk_base64_decode(key_blob, strlen(key_blob));
++    if (!pk) {
++      err_msg = tor_strdup("512 Failed to decode RSA key\r\n");
++      goto err;
++    }
++    if (crypto_pk_num_bits(pk) != PK_BYTES*8) {
++      err_msg = tor_strdup("512 Invalid RSA key size\r\n");
++      goto err;
++    }
++  } else if (!strcasecmp(key_type_new, key_type)) {
++    /* "NEW:<Algorithm>" - Generating a new key, blob as algorithm. */
++    if (!strcasecmp(key_type_rsa1024, key_blob) ||
++        !strcasecmp(key_type_best, key_blob)) {
++      /* "RSA1024", RSA 1024 bit, also currently "BEST" by default. */
++      pk = crypto_pk_new();
++      if (crypto_pk_generate_key(pk)) {
++        tor_asprintf(&err_msg, "551 Failed to generate %s key\r\n",
++                     key_type_rsa1024);
++        goto err;
++      }
++      if (!discard_pk) {
++        if (crypto_pk_base64_encode(pk, &key_new_blob)) {
++          tor_asprintf(&err_msg, "551 Failed to encode %s key\r\n",
++                       key_type_rsa1024);
++          goto err;
++        }
++        key_new_alg = key_type_rsa1024;
++      }
++    } else {
++      err_msg = tor_strdup("513 Invalid key type\r\n");
++      goto err;
++    }
++  } else {
++    err_msg = tor_strdup("513 Invalid key type\r\n");
++    goto err;
++  }
++
++  /* Succeded in loading or generating a private key. */
++  tor_assert(pk);
++  ok = 1;
++
++ err:
++  SMARTLIST_FOREACH(key_args, char *, cp, {
++    memwipe(cp, 0, strlen(cp));
++    tor_free(cp);
++  });
++
++  if (!ok) {
++    crypto_pk_free(pk);
++    pk = NULL;
++  }
++  if (err_msg_out) *err_msg_out = err_msg;
++  *key_new_alg_out = key_new_alg;
++  *key_new_blob_out = key_new_blob;
++
++  return pk;
 +}
 +
 +/** Called when we get a DEL_ONION command; parse the body, and remove
@@ -500,16 +537,16 @@ index 34d539b..882b0cf 100644
 +   * explicitly belongs to a different control connection, and an error
 +   * should be returned.
 +   */
-+  smartlist_t *l[2] = {
++  smartlist_t *services[2] = {
 +    conn->ephemeral_onion_services,
 +    detached_onion_services
 +  };
 +  smartlist_t *onion_services = NULL;
 +  int idx = -1;
-+  for (size_t i = 0; i < ARRAY_LENGTH(l); i++) {
-+    idx = smartlist_string_pos(l[i], service_id);
++  for (size_t i = 0; i < ARRAY_LENGTH(services); i++) {
++    idx = smartlist_string_pos(services[i], service_id);
 +    if (idx != -1) {
-+      onion_services = l[i];
++      onion_services = services[i];
 +      break;
 +    }
 +  }
@@ -535,7 +572,7 @@ index 34d539b..882b0cf 100644
 +    send_control_done(conn);
 +  }
 +
-+out:
++ out:
 +  SMARTLIST_FOREACH(args, char *, cp, {
 +    memwipe(cp, 0, strlen(cp));
 +    tor_free(cp);
@@ -547,7 +584,7 @@ index 34d539b..882b0cf 100644
  /** Called when <b>conn</b> has no more bytes left on its outbuf. */
  int
  connection_control_finished_flushing(control_connection_t *conn)
-@@ -3257,6 +3606,15 @@ connection_control_closed(control_connection_t *conn)
+@@ -3434,6 +3816,15 @@ connection_control_closed(control_connection_t *conn)
    conn->event_mask = 0;
    control_update_global_event_mask();
  
@@ -563,9 +600,9 @@ index 34d539b..882b0cf 100644
    if (conn->is_owning_control_connection) {
      lost_owning_controller("connection", "closed");
    }
-@@ -3508,6 +3866,16 @@ connection_control_process_inbuf(control_connection_t *conn)
-   } else if (!strcasecmp(conn->incoming_cmd, "DROPGUARDS")) {
-     if (handle_control_dropguards(conn, cmd_data_len, args))
+@@ -3688,6 +4079,16 @@ connection_control_process_inbuf(control_connection_t *conn)
+   } else if (!strcasecmp(conn->incoming_cmd, "HSFETCH")) {
+     if (handle_control_hsfetch(conn, cmd_data_len, args))
        return -1;
 +  } else if (!strcasecmp(conn->incoming_cmd, "ADD_ONION")) {
 +    int ret = handle_control_add_onion(conn, cmd_data_len, args);
@@ -580,7 +617,7 @@ index 34d539b..882b0cf 100644
    } else {
      connection_printf_to_buf(conn, "510 Unrecognized command \"%s\"\r\n",
                               conn->incoming_cmd);
-@@ -5281,6 +5649,10 @@ control_free_all(void)
+@@ -5520,6 +5921,10 @@ control_free_all(void)
  {
    if (authentication_cookie) /* Free the auth cookie */
      tor_free(authentication_cookie);
@@ -591,11 +628,27 @@ index 34d539b..882b0cf 100644
  }
  
  #ifdef TOR_UNIT_TESTS
+diff --git a/src/or/control.h b/src/or/control.h
+index 93bcb8e..cb0468f 100644
+--- a/src/or/control.h
++++ b/src/or/control.h
+@@ -233,6 +233,11 @@ void append_cell_stats_by_command(smartlist_t *event_parts,
+ void format_cell_stats(char **event_string, circuit_t *circ,
+                        cell_stats_t *cell_stats);
+ STATIC char *get_bw_samples(void);
++
++STATIC crypto_pk_t *add_onion_helper_keyarg(const char *arg, int discard_pk,
++                                            const char **key_new_alg_out,
++                                            char **key_new_blob_out,
++                                            char **err_msg_out);
+ #endif
+ 
+ #endif
 diff --git a/src/or/or.h b/src/or/or.h
-index f75e776..242a327 100644
+index 1c00423..dee1881 100644
 --- a/src/or/or.h
 +++ b/src/or/or.h
-@@ -1731,6 +1731,9 @@ typedef struct control_connection_t {
+@@ -1735,6 +1735,9 @@ typedef struct control_connection_t {
     * connection. */
    unsigned int is_owning_control_connection:1;
  
@@ -606,7 +659,7 @@ index f75e776..242a327 100644
     * have not received a successful AUTHENTICATE command, points to
     * the value which the client must send to authenticate itself;
 diff --git a/src/or/rendservice.c b/src/or/rendservice.c
-index eb2748c..1d9ae4d 100644
+index 41bbd69..f257f6e 100644
 --- a/src/or/rendservice.c
 +++ b/src/or/rendservice.c
 @@ -42,9 +42,15 @@ static int intro_point_accepted_intro_count(rend_intro_point_t *intro);
@@ -625,6 +678,24 @@ index eb2748c..1d9ae4d 100644
  
  static ssize_t rend_service_parse_intro_for_v0_or_v1(
      rend_intro_cell_t *intro,
+@@ -65,7 +71,7 @@ static ssize_t rend_service_parse_intro_for_v3(
+ /** Represents the mapping from a virtual port of a rendezvous service to
+  * a real port on some IP.
+  */
+-typedef struct rend_service_port_config_t {
++struct rend_service_port_config_s {
+   /* The incoming HS virtual port we're mapping */
+   uint16_t virtual_port;
+   /* Is this an AF_UNIX port? */
+@@ -76,7 +82,7 @@ typedef struct rend_service_port_config_t {
+   tor_addr_t real_addr;
+   /* The socket path to connect to, if is_unix_addr */
+   char unix_addr[FLEXIBLE_ARRAY_MEMBER];
+-} rend_service_port_config_t;
++};
+ 
+ /** Try to maintain this many intro points per service by default. */
+ #define NUM_INTRO_POINTS_DEFAULT 3
 @@ -102,7 +108,8 @@ typedef struct rend_service_port_config_t {
  /** Represents a single hidden service running at this OP. */
  typedef struct rend_service_t {
@@ -650,16 +721,28 @@ index eb2748c..1d9ae4d 100644
  /** A list of rend_service_t's for services run on this OP.
   */
  static smartlist_t *rend_service_list = NULL;
-@@ -233,7 +248,7 @@ rend_service_free_all(void)
+@@ -195,7 +210,8 @@ rend_service_free(rend_service_t *service)
+     return;
+ 
+   tor_free(service->directory);
+-  SMARTLIST_FOREACH(service->ports, void*, p, tor_free(p));
++  SMARTLIST_FOREACH(service->ports, rend_service_port_config_t*, p,
++                    rend_service_port_config_free(p));
+   smartlist_free(service->ports);
+   if (service->private_key)
+     crypto_pk_free(service->private_key);
+@@ -232,8 +248,9 @@ rend_service_free_all(void)
+ }
  
  /** Validate <b>service</b> and add it to rend_service_list if possible.
++ * Return 0 on success and -1 on failure.
   */
 -static void
 +static int
  rend_add_service(rend_service_t *service)
  {
    int i;
-@@ -245,16 +260,17 @@ rend_add_service(rend_service_t *service)
+@@ -245,16 +262,17 @@ rend_add_service(rend_service_t *service)
        smartlist_len(service->clients) == 0) {
      log_warn(LD_CONFIG, "Hidden service (%s) with client authorization but no "
                          "clients; ignoring.",
@@ -680,7 +763,7 @@ index eb2748c..1d9ae4d 100644
    } else {
      int dupe = 0;
      /* XXX This duplicate check has two problems:
-@@ -272,14 +288,17 @@ rend_add_service(rend_service_t *service)
+@@ -272,14 +290,17 @@ rend_add_service(rend_service_t *service)
       * lock file.  But this is enough to detect a simple mistake that
       * at least one person has actually made.
       */
@@ -706,7 +789,7 @@ index eb2748c..1d9ae4d 100644
      }
      smartlist_add(rend_service_list, service);
      log_debug(LD_REND,"Configuring service with directory \"%s\"",
-@@ -305,7 +324,9 @@ rend_add_service(rend_service_t *service)
+@@ -305,7 +326,9 @@ rend_add_service(rend_service_t *service)
  #endif /* defined(HAVE_SYS_UN_H) */
        }
      }
@@ -716,7 +799,142 @@ index eb2748c..1d9ae4d 100644
  }
  
  /** Return a new rend_service_port_config_t with its path set to
-@@ -632,6 +653,28 @@ rend_config_services(const or_options_t *options, int validate_only)
+@@ -324,15 +347,17 @@ rend_service_port_config_new(const char *socket_path)
+   return conf;
+ }
+ 
+-/** Parses a real-port to virtual-port mapping and returns a new
+- * rend_service_port_config_t.
++/** Parses a real-port to virtual-port mapping separated by the provided
++ * separator and returns a new rend_service_port_config_t, or NULL and an
++ * optional error string on failure.
+  *
+- * The format is: VirtualPort (IP|RealPort|IP:RealPort|'socket':path)?
++ * The format is: VirtualPort SEP (IP|RealPort|IP:RealPort|'socket':path)?
+  *
+  * IP defaults to 127.0.0.1; RealPort defaults to VirtualPort.
+  */
+-static rend_service_port_config_t *
+-parse_port_config(const char *string)
++rend_service_port_config_t *
++rend_service_parse_port_config(const char *string, const char *sep,
++                               char **err_msg_out)
+ {
+   smartlist_t *sl;
+   int virtport;
+@@ -343,19 +368,24 @@ parse_port_config(const char *string)
+   rend_service_port_config_t *result = NULL;
+   unsigned int is_unix_addr = 0;
+   char *socket_path = NULL;
++  char *err_msg = NULL;
+ 
+   sl = smartlist_new();
+-  smartlist_split_string(sl, string, " ",
++  smartlist_split_string(sl, string, sep,
+                          SPLIT_SKIP_SPACE|SPLIT_IGNORE_BLANK, 0);
+   if (smartlist_len(sl) < 1 || smartlist_len(sl) > 2) {
+-    log_warn(LD_CONFIG, "Bad syntax in hidden service port configuration.");
++    if (err_msg_out)
++      err_msg = tor_strdup("Bad syntax in hidden service port configuration.");
++
+     goto err;
+   }
+ 
+   virtport = (int)tor_parse_long(smartlist_get(sl,0), 10, 1, 65535, NULL,NULL);
+   if (!virtport) {
+-    log_warn(LD_CONFIG, "Missing or invalid port %s in hidden service port "
+-             "configuration", escaped(smartlist_get(sl,0)));
++    if (err_msg_out)
++      tor_asprintf(&err_msg, "Missing or invalid port %s in hidden service "
++                   "port configuration", escaped(smartlist_get(sl,0)));
++
+     goto err;
+   }
+ 
+@@ -369,10 +399,11 @@ parse_port_config(const char *string)
+     addrport = smartlist_get(sl,1);
+     ret = config_parse_unix_port(addrport, &socket_path);
+     if (ret < 0 && ret != -ENOENT) {
+-      if (ret == -EINVAL) {
+-        log_warn(LD_CONFIG,
+-                 "Empty socket path in hidden service port configuration.");
+-      }
++      if (ret == -EINVAL)
++        if (err_msg_out)
++          err_msg = tor_strdup("Empty socket path in hidden service port "
++                               "configuration.");
++
+       goto err;
+     }
+     if (socket_path) {
+@@ -380,8 +411,10 @@ parse_port_config(const char *string)
+     } else if (strchr(addrport, ':') || strchr(addrport, '.')) {
+       /* else try it as an IP:port pair if it has a : or . in it */
+       if (tor_addr_port_lookup(addrport, &addr, &p)<0) {
+-        log_warn(LD_CONFIG,"Unparseable address in hidden service port "
+-                 "configuration.");
++        if (err_msg_out)
++          err_msg = tor_strdup("Unparseable address in hidden service port "
++                               "configuration.");
++
+         goto err;
+       }
+       realport = p?p:virtport;
+@@ -389,8 +422,11 @@ parse_port_config(const char *string)
+       /* No addr:port, no addr -- must be port. */
+       realport = (int)tor_parse_long(addrport, 10, 1, 65535, NULL, NULL);
+       if (!realport) {
+-        log_warn(LD_CONFIG,"Unparseable or out-of-range port %s in hidden "
+-                 "service port configuration.", escaped(addrport));
++        if (err_msg_out)
++          tor_asprintf(&err_msg, "Unparseable or out-of-range port %s in "
++                       "hidden service port configuration.",
++                       escaped(addrport));
++
+         goto err;
+       }
+       tor_addr_from_ipv4h(&addr, 0x7F000001u); /* Default to 127.0.0.1 */
+@@ -408,6 +444,7 @@ parse_port_config(const char *string)
+   }
+ 
+  err:
++  if (err_msg_out) *err_msg_out = err_msg;
+   SMARTLIST_FOREACH(sl, char *, c, tor_free(c));
+   smartlist_free(sl);
+   if (socket_path) tor_free(socket_path);
+@@ -415,6 +452,13 @@ parse_port_config(const char *string)
+   return result;
+ }
+ 
++/** Release all storage held in a rend_service_port_config_t. */
++void
++rend_service_port_config_free(rend_service_port_config_t *p)
++{
++  tor_free(p);
++}
++
+ /** Set up rend_service_list, based on the values of HiddenServiceDir and
+  * HiddenServicePort in <b>options</b>.  Return 0 on success and -1 on
+  * failure.  (If <b>validate_only</b> is set, parse, warn and return as
+@@ -456,11 +500,16 @@ rend_config_services(const or_options_t *options, int validate_only)
+        return -1;
+      }
+      if (!strcasecmp(line->key, "HiddenServicePort")) {
+-       portcfg = parse_port_config(line->value);
++       char *err_msg = NULL;
++       portcfg = rend_service_parse_port_config(line->value, " ", &err_msg);
+        if (!portcfg) {
++         if (err_msg)
++           log_warn(LD_CONFIG, "%s", err_msg);
++         tor_free(err_msg);
+          rend_service_free(service);
+          return -1;
+        }
++       tor_assert(!err_msg);
+        smartlist_add(service->ports, portcfg);
+      } else if (!strcasecmp(line->key, "HiddenServiceAllowUnknownPorts")) {
+        service->allow_unknown_ports = (int)tor_parse_long(line->value,
+@@ -632,6 +681,28 @@ rend_config_services(const or_options_t *options, int validate_only)
    if (old_service_list && !validate_only) {
      smartlist_t *surviving_services = smartlist_new();
  
@@ -745,22 +963,21 @@ index eb2748c..1d9ae4d 100644
      /* Copy introduction points to new services. */
      /* XXXX This is O(n^2), but it's only called on reconfigure, so it's
       * probably ok? */
-@@ -685,6 +728,128 @@ rend_config_services(const or_options_t *options, int validate_only)
+@@ -685,6 +756,118 @@ rend_config_services(const or_options_t *options, int validate_only)
    return 0;
  }
  
-+/** Add the ephemeral service <b>pk</b>/<b>port_cfg_strs</b> if possible.
-+ * Returns 0 on success, and < 0 on failure, with -1 indicating an internal
-+ * error, -2 indicating address generation failure, -3 indicating a collision
-+ * with an existing address, and -4 indicating an invalid virtport/target.
-+ * On success, service_id_out is set to a string suitable as a unique
-+ * identifier for the newly created ephemeral service.  If a service id
-+ * pointer is provided, it is the caller's responsibility to sanitize and
-+ * free any provided service id.
++/** Add the ephemeral service <b>pk</b>/<b>ports</b> if possible.
++ *
++ * Regardless of sucess/failure, callers should not touch pk/ports after
++ * calling this routine, and may assume that correct cleanup has been done
++ * on failure.
++ *
++ * Return an appropriate rend_service_add_ephemeral_status_t.
 + */
-+int
++rend_service_add_ephemeral_status_t
 +rend_service_add_ephemeral(crypto_pk_t *pk,
-+                           const smartlist_t *port_cfg_strs,
++                           smartlist_t *ports,
 +                           char **service_id_out)
 +{
 +  *service_id_out = NULL;
@@ -771,10 +988,18 @@ index eb2748c..1d9ae4d 100644
 +  s->directory = NULL; /* This indicates the service is ephemeral. */
 +  s->private_key = pk;
 +  s->auth_type = REND_NO_AUTH;
-+  s->ports = smartlist_new();
-+  if (rend_service_derive_key_digests(s)<0) {
++  s->ports = ports;
++  s->intro_period_started = time(NULL);
++  s->n_intro_points_wanted = NUM_INTRO_POINTS_DEFAULT;
++  if (rend_service_derive_key_digests(s) < 0) {
 +    rend_service_free(s);
-+    return -2;
++    return RSAE_BADPRIVKEY;
++  }
++
++  if (!s->ports || smartlist_len(s->ports) == 0) {
++    log_warn(LD_CONFIG, "At least one VIRTPORT/TARGET must be specified.");
++    rend_service_free(s);
++    return RSAE_BADVIRTPORT;
 +  }
 +
 +  /* Enforcing pk/id uniqueness should be done by rend_service_load_keys(), but
@@ -784,40 +1009,23 @@ index eb2748c..1d9ae4d 100644
 +    log_warn(LD_CONFIG, "Onion Service private key collides with an "
 +             "existing service.");
 +    rend_service_free(s);
-+    return -3;
++    return RSAE_ADDREXISTS;
 +  }
 +  if (rend_service_get_by_service_id(s->service_id)) {
 +    log_warn(LD_CONFIG, "Onion Service id collides with an existing service.");
 +    rend_service_free(s);
-+    return -3;
-+  }
-+
-+  /* Do the rest of the initialization, now that the key has been validated. */
-+  s->intro_period_started = time(NULL);
-+  s->n_intro_points_wanted = NUM_INTRO_POINTS_DEFAULT;
-+  SMARTLIST_FOREACH(port_cfg_strs, const char*, cp, {
-+    rend_service_port_config_t *p = parse_port_config(cp);
-+    if (!p) {
-+      rend_service_free(s);
-+      return -4;
-+    }
-+    smartlist_add(s->ports, p);
-+  });
-+  if (smartlist_len(s->ports) == 0) {
-+    log_warn(LD_CONFIG, "At least one VIRTPORT/TARGET must be specified.");
-+    rend_service_free(s);
-+    return -4;
++    return RSAE_ADDREXISTS;
 +  }
 +
 +  /* Initialize the service. */
 +  if (rend_add_service(s)) {
 +    rend_service_free(s);
-+    return -1;
++    return RSAE_INTERNAL;
 +  }
 +  *service_id_out = tor_strdup(s->service_id);
 +
 +  log_debug(LD_CONFIG, "Added ephemeral Onion Service: %s", s->service_id);
-+  return 0;
++  return RSAE_OKAY;
 +}
 +
 +/** Remove the ephemeral service <b>service_id</b> if possible.  Returns 0 on
@@ -827,7 +1035,7 @@ index eb2748c..1d9ae4d 100644
 +rend_service_del_ephemeral(const char *service_id)
 +{
 +  rend_service_t *s;
-+  if (!rend_valid_service_id(service_id)){
++  if (!rend_valid_service_id(service_id)) {
 +    log_warn(LD_CONFIG, "Requested malformed Onion Service id for removal.");
 +    return -1;
 +  }
@@ -874,7 +1082,7 @@ index eb2748c..1d9ae4d 100644
  /** Replace the old value of <b>service</b>-\>desc with one that reflects
   * the other fields in service.
   */
-@@ -769,6 +934,7 @@ rend_service_add_filenames_to_list(smartlist_t *lst, const rend_service_t *s)
+@@ -769,6 +952,7 @@ rend_service_add_filenames_to_list(smartlist_t *lst, const rend_service_t *s)
  {
    tor_assert(lst);
    tor_assert(s);
@@ -882,7 +1090,7 @@ index eb2748c..1d9ae4d 100644
    smartlist_add_asprintf(lst, "%s"PATH_SEPARATOR"private_key",
                           s->directory);
    smartlist_add_asprintf(lst, "%s"PATH_SEPARATOR"hostname",
-@@ -787,11 +953,31 @@ rend_services_add_filenames_to_lists(smartlist_t *open_lst,
+@@ -787,11 +971,31 @@ rend_services_add_filenames_to_lists(smartlist_t *open_lst,
    if (!rend_service_list)
      return;
    SMARTLIST_FOREACH_BEGIN(rend_service_list, rend_service_t *, s) {
@@ -916,26 +1124,26 @@ index eb2748c..1d9ae4d 100644
  /** Load and/or generate private keys for the hidden service <b>s</b>,
   * possibly including keys for client authorization.  Return 0 on success, -1
   * on failure. */
-@@ -830,15 +1016,10 @@ rend_service_load_keys(rend_service_t *s)
+@@ -830,15 +1034,10 @@ rend_service_load_keys(rend_service_t *s)
    if (!s->private_key)
      return -1;
  
 -  /* Create service file */
 -  if (rend_get_service_id(s->private_key, s->service_id)<0) {
 -    log_warn(LD_BUG, "Internal error: couldn't encode service ID.");
--    return -1;
++  if (rend_service_derive_key_digests(s) < 0)
+     return -1;
 -  }
 -  if (crypto_pk_get_digest(s->private_key, s->pk_digest)<0) {
 -    log_warn(LD_BUG, "Couldn't compute hash of public key.");
-+  if (rend_service_derive_key_digests(s) < 0)
-     return -1;
+-    return -1;
 -  }
 +
 +  /* Create service file */
    if (strlcpy(fname,s->directory,sizeof(fname)) >= sizeof(fname) ||
        strlcat(fname,PATH_SEPARATOR"hostname",sizeof(fname))
        >= sizeof(fname)) {
-@@ -1080,6 +1261,20 @@ rend_service_get_by_pk_digest(const char* digest)
+@@ -1078,6 +1277,20 @@ rend_service_get_by_pk_digest(const char* digest)
    return NULL;
  }
  
@@ -957,20 +1165,297 @@ index eb2748c..1d9ae4d 100644
   * to have good uptime. Else return 0.
   */
 diff --git a/src/or/rendservice.h b/src/or/rendservice.h
-index 754f7c3..6c08d03 100644
+index 754f7c3..6d0973b 100644
 --- a/src/or/rendservice.h
 +++ b/src/or/rendservice.h
-@@ -101,5 +101,10 @@ int rend_service_set_connection_addr_port(edge_connection_t *conn,
+@@ -15,6 +15,7 @@
+ #include "or.h"
+ 
+ typedef struct rend_intro_cell_s rend_intro_cell_t;
++typedef struct rend_service_port_config_s rend_service_port_config_t;
+ 
+ #ifdef RENDSERVICE_PRIVATE
+ 
+@@ -101,5 +102,23 @@ int rend_service_set_connection_addr_port(edge_connection_t *conn,
  void rend_service_dump_stats(int severity);
  void rend_service_free_all(void);
  
-+int rend_service_add_ephemeral(crypto_pk_t *pk,
-+                               const smartlist_t *port_cfg_strs,
++rend_service_port_config_t *rend_service_parse_port_config(const char *string,
++                                                           const char *sep,
++                                                           char **err_msg_out);
++void rend_service_port_config_free(rend_service_port_config_t *p);
++
++/** Return value from rend_service_add_ephemeral. */
++typedef enum {
++  RSAE_BADVIRTPORT = -4, /**< Invalid VIRTPORT/TARGET(s) */
++  RSAE_ADDREXISTS = -3, /**< Onion address collision */
++  RSAE_BADPRIVKEY = -2, /**< Invalid public key */
++  RSAE_INTERNAL = -1, /**< Internal error */
++  RSAE_OKAY = 0 /**< Service added as expected */
++} rend_service_add_ephemeral_status_t;
++rend_service_add_ephemeral_status_t rend_service_add_ephemeral(crypto_pk_t *pk,
++                               smartlist_t *ports,
 +                               char **service_id_out);
 +int rend_service_del_ephemeral(const char *service_id);
 +
  #endif
  
+diff --git a/src/test/include.am b/src/test/include.am
+index 570048d..c36ebb7 100644
+--- a/src/test/include.am
++++ b/src/test/include.am
+@@ -56,6 +56,7 @@ src_test_test_SOURCES = \
+ 	src/test/test_circuitmux.c \
+ 	src/test/test_config.c \
+ 	src/test/test_containers.c \
++	src/test/test_controller.c \
+ 	src/test/test_controller_events.c \
+ 	src/test/test_crypto.c \
+ 	src/test/test_data.c \
+diff --git a/src/test/test.c b/src/test/test.c
+index 0524a69..f30b8ae 100644
+--- a/src/test/test.c
++++ b/src/test/test.c
+@@ -1127,6 +1127,7 @@ extern struct testcase_t circuitlist_tests[];
+ extern struct testcase_t circuitmux_tests[];
+ extern struct testcase_t config_tests[];
+ extern struct testcase_t container_tests[];
++extern struct testcase_t controller_tests[];
+ extern struct testcase_t controller_event_tests[];
+ extern struct testcase_t crypto_tests[];
+ extern struct testcase_t dir_tests[];
+@@ -1171,7 +1172,8 @@ struct testgroup_t testgroups[] = {
+   { "circuitmux/", circuitmux_tests },
+   { "config/", config_tests },
+   { "container/", container_tests },
+-  { "control/", controller_event_tests },
++  { "control/", controller_tests },
++  { "control/event/", controller_event_tests },
+   { "crypto/", crypto_tests },
+   { "dir/", dir_tests },
+   { "dir/md/", microdesc_tests },
+diff --git a/src/test/test_controller.c b/src/test/test_controller.c
+new file mode 100644
+index 0000000..9039dc7
+--- /dev/null
++++ b/src/test/test_controller.c
+@@ -0,0 +1,161 @@
++/* Copyright (c) 2015, The Tor Project, Inc. */
++/* See LICENSE for licensing information */
++
++#define CONTROL_PRIVATE
++#include "or.h"
++#include "control.h"
++#include "rendservice.h"
++#include "test.h"
++
++static void
++test_add_onion_helper_keyarg(void *arg)
++{
++  crypto_pk_t *pk = NULL;
++  crypto_pk_t *pk2 = NULL;
++  const char *key_new_alg = NULL;
++  char *key_new_blob = NULL;
++  char *err_msg = NULL;
++  char *encoded = NULL;
++  char *arg_str = NULL;
++
++  (void) arg;
++
++  /* Test explicit RSA1024 key generation. */
++  pk = add_onion_helper_keyarg("NEW:RSA1024", 0, &key_new_alg, &key_new_blob,
++                               &err_msg);
++  tt_assert(pk);
++  tt_str_op(key_new_alg, OP_EQ, "RSA1024");
++  tt_assert(key_new_blob);
++  tt_assert(!err_msg);
++
++  /* Test "BEST" key generation (Assumes BEST = RSA1024). */
++  crypto_pk_free(pk);
++  tor_free(key_new_blob);
++  pk = add_onion_helper_keyarg("NEW:BEST", 0, &key_new_alg, &key_new_blob,
++                               &err_msg);
++  tt_assert(pk);
++  tt_str_op(key_new_alg, OP_EQ, "RSA1024");
++  tt_assert(key_new_blob);
++  tt_assert(!err_msg);
++
++  /* Test discarding the private key. */
++  crypto_pk_free(pk);
++  tor_free(key_new_blob);
++  pk = add_onion_helper_keyarg("NEW:BEST", 1, &key_new_alg, &key_new_blob,
++                               &err_msg);
++  tt_assert(pk);
++  tt_assert(!key_new_alg);
++  tt_assert(!key_new_blob);
++  tt_assert(!err_msg);
++
++  /* Test generating a invalid key type. */
++  crypto_pk_free(pk);
++  pk = add_onion_helper_keyarg("NEW:RSA512", 0, &key_new_alg, &key_new_blob,
++                               &err_msg);
++  tt_assert(!pk);
++  tt_assert(!key_new_alg);
++  tt_assert(!key_new_blob);
++  tt_assert(err_msg);
++
++  /* Test loading a RSA1024 key. */
++  tor_free(err_msg);
++  pk = pk_generate(0);
++  tt_int_op(0, OP_EQ, crypto_pk_base64_encode(pk, &encoded));
++  tor_asprintf(&arg_str, "RSA1024:%s", encoded);
++  pk2 = add_onion_helper_keyarg(arg_str, 0, &key_new_alg, &key_new_blob,
++                                &err_msg);
++  tt_assert(pk2);
++  tt_assert(!key_new_alg);
++  tt_assert(!key_new_blob);
++  tt_assert(!err_msg);
++  tt_assert(crypto_pk_cmp_keys(pk, pk2) == 0);
++
++  /* Test loading a invalid key type. */
++  tor_free(arg_str);
++  tor_asprintf(&arg_str, "RSA512:%s", encoded);
++  pk = add_onion_helper_keyarg(arg_str, 0, &key_new_alg, &key_new_blob,
++                               &err_msg);
++  tt_assert(!pk);
++  tt_assert(!key_new_alg);
++  tt_assert(!key_new_blob);
++  tt_assert(err_msg);
++
++  /* Test loading a invalid key. */
++  tor_free(arg_str);
++  tor_free(err_msg);
++  encoded[strlen(encoded)/2] = '\0';
++  tor_asprintf(&arg_str, "RSA1024:%s", encoded);
++  pk = add_onion_helper_keyarg(arg_str, 0, &key_new_alg, &key_new_blob,
++                               &err_msg);
++  tt_assert(!pk);
++  tt_assert(!key_new_alg);
++  tt_assert(!key_new_blob);
++  tt_assert(err_msg);
++
++ done:
++  crypto_pk_free(pk);
++  crypto_pk_free(pk2);
++  tor_free(key_new_blob);
++  tor_free(err_msg);
++  tor_free(encoded);
++  tor_free(arg_str);
++}
++
++static void
++test_rend_service_parse_port_config(void *arg)
++{
++  const char *sep = ",";
++  rend_service_port_config_t *cfg = NULL;
++  char *err_msg = NULL;
++
++  (void)arg;
++
++  /* Test "VIRTPORT" only. */
++  cfg = rend_service_parse_port_config("80", sep, &err_msg);
++  tt_assert(cfg);
++  tt_assert(!err_msg);
++
++  /* Test "VIRTPORT,TARGET" (Target is port). */
++  rend_service_port_config_free(cfg);
++  cfg = rend_service_parse_port_config("80,8080", sep, &err_msg);
++  tt_assert(cfg);
++  tt_assert(!err_msg);
++
++  /* Test "VIRTPORT,TARGET" (Target is IPv4:port). */
++  rend_service_port_config_free(cfg);
++  cfg = rend_service_parse_port_config("80,192.0.2.1:8080", sep, &err_msg);
++  tt_assert(cfg);
++  tt_assert(!err_msg);
++
++  /* Test "VIRTPORT,TARGET" (Target is IPv6:port). */
++  rend_service_port_config_free(cfg);
++  cfg = rend_service_parse_port_config("80,[2001:db8::1]:8080", sep, &err_msg);
++  tt_assert(cfg);
++  tt_assert(!err_msg);
++
++  /* XXX: Someone should add tests for AF_UNIX targets if supported. */
++
++  /* Test empty config. */
++  rend_service_port_config_free(cfg);
++  cfg = rend_service_parse_port_config("", sep, &err_msg);
++  tt_assert(!cfg);
++  tt_assert(err_msg);
++
++  /* Test invalid port. */
++  tor_free(err_msg);
++  cfg = rend_service_parse_port_config("90001", sep, &err_msg);
++  tt_assert(!cfg);
++  tt_assert(err_msg);
++
++ done:
++  rend_service_port_config_free(cfg);
++  tor_free(err_msg);
++}
++
++struct testcase_t controller_tests[] = {
++  { "add_onion_helper_keyarg", test_add_onion_helper_keyarg, 0, NULL, NULL },
++  { "rend_service_parse_port_config", test_rend_service_parse_port_config, 0,
++    NULL, NULL },
++  END_OF_TESTCASES
++};
++
+diff --git a/src/test/test_crypto.c b/src/test/test_crypto.c
+index bcd7069..84a90da 100644
+--- a/src/test/test_crypto.c
++++ b/src/test/test_crypto.c
+@@ -597,6 +597,42 @@ test_crypto_pk_fingerprints(void *arg)
+   tor_free(mem_op_hex_tmp);
+ }
+ 
++static void
++test_crypto_pk_base64(void *arg)
++{
++  crypto_pk_t *pk1 = NULL;
++  crypto_pk_t *pk2 = NULL;
++  char *encoded = NULL;
++
++  (void)arg;
++
++  /* Test Base64 encoding a key. */
++  pk1 = pk_generate(0);
++  tt_assert(pk1);
++  tt_int_op(0, OP_EQ, crypto_pk_base64_encode(pk1, &encoded));
++  tt_assert(encoded);
++
++  /* Test decoding a valid key. */
++  pk2 = crypto_pk_base64_decode(encoded, strlen(encoded));
++  tt_assert(pk2);
++  tt_assert(crypto_pk_cmp_keys(pk1,pk2) == 0);
++  crypto_pk_free(pk2);
++
++  /* Test decoding a invalid key (not Base64). */
++  static const char *invalid_b64 = "The key is in another castle!";
++  pk2 = crypto_pk_base64_decode(invalid_b64, strlen(invalid_b64));
++  tt_assert(!pk2);
++
++  /* Test decoding a truncated Base64 blob. */
++  pk2 = crypto_pk_base64_decode(encoded, strlen(encoded)/2);
++  tt_assert(!pk2);
++
++ done:
++  crypto_pk_free(pk1);
++  crypto_pk_free(pk2);
++  tor_free(encoded);
++}
++
+ /** Sanity check for crypto pk digests  */
+ static void
+ test_crypto_digests(void *arg)
+@@ -1667,6 +1703,7 @@ struct testcase_t crypto_tests[] = {
+   CRYPTO_LEGACY(sha),
+   CRYPTO_LEGACY(pk),
+   { "pk_fingerprints", test_crypto_pk_fingerprints, TT_FORK, NULL, NULL },
++  { "pk_base64", test_crypto_pk_base64, TT_FORK, NULL, NULL },
+   CRYPTO_LEGACY(digests),
+   CRYPTO_LEGACY(dh),
+   { "aes_iv_AES", test_crypto_aes_iv, TT_FORK, &passthrough_setup,
 -- 
 2.3.5
 

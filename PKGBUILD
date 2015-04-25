@@ -20,7 +20,7 @@
 pkgname=tor-git-hax
 _branch=master
 #_branch=maint-0.2.6
-pkgver=0.2.7.0.alpha.20180
+pkgver=0.2.7.0.alpha.20238
 pkgrel=1
 pkgdesc="An anonymizing overlay network (development version, extra patches)"
 arch=('i686' 'x86_64' 'armv6h' 'armv7h')
@@ -47,7 +47,7 @@ sha256sums=('SKIP'
             '5acd97eed1e4e175d5d547704a7d125009de6dc51d3c7163b7311e82fd34e9a2'
             '9ef4558166faa1e5a2691654e55fb40c67c54c803044678f144bb09d8ed5b43b'
             '4a27a177889c044ff4e3e1f6ab8bbb32211466d53d884974240dab67592343b2'
-            'f6e2cc88eb099ba803ee4060d2e4229e4b934f2717845d99be0c1b5cf85890c8'
+            'add9a0f58dd954f186f0846ba627c5e2a2fe94fa3c34b811151d63324e9db3a2'
             'eeb9ec7605fa27648fc4b74f664e05a9ceb7dab969f925189cadc1579f8005bb')
 
 pkgver () {
