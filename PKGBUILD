@@ -11,8 +11,6 @@
 # who runs Tor to find bugs in it", but such a build may be useful to other
 # people as well.
 #
-#  * bug6411  - ADD_ONION/DEL_ONION Hidden Service creation via the Control
-#               Port.
 #  * bug15482 - Circuit lifespan increased indefinately for circuits created
 #               from a SocksPort with IsolateSocksAuth.
 #
@@ -39,7 +37,6 @@ source=("git+https://git.torproject.org/tor.git#branch=${_branch}"
         'tor.service'
         'tor.tmpfiles'
         'tor.sysusers'
-        'bug6411.patch'
         'bug15482.patch')
 
 sha256sums=('SKIP'
@@ -47,7 +44,6 @@ sha256sums=('SKIP'
             '5acd97eed1e4e175d5d547704a7d125009de6dc51d3c7163b7311e82fd34e9a2'
             '9ef4558166faa1e5a2691654e55fb40c67c54c803044678f144bb09d8ed5b43b'
             '4a27a177889c044ff4e3e1f6ab8bbb32211466d53d884974240dab67592343b2'
-            'add9a0f58dd954f186f0846ba627c5e2a2fe94fa3c34b811151d63324e9db3a2'
             'eeb9ec7605fa27648fc4b74f664e05a9ceb7dab969f925189cadc1579f8005bb')
 
 pkgver () {
