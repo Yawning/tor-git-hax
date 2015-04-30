@@ -56,7 +56,6 @@ prepare() {
     cd "$srcdir/tor"
     export GIT_COMMITTER_NAME="nobody"
     export GIT_COMMITTER_EMAIL="nobody@localhost"
-    git am "$srcdir/bug6411.patch"
     git am "$srcdir/bug15482.patch"
     ./autogen.sh
 }
